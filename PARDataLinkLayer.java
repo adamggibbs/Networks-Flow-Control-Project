@@ -12,8 +12,8 @@ import java.time.Instant;
 
 // =============================================================================
 /**
- * @file   ParityDataLinkLayer.java
- * @author Adam Gibbs
+ * @file   PARDataLinkLayer.java
+ * @author Adam Gibbs & Nathanial Crosby
  * @date   March 2020
  *
  * A data link layer that uses start/stop tags and byte packing to frame the
@@ -63,8 +63,17 @@ public class PARDataLinkLayer extends DataLinkLayer {
 	// Add the parity byte.
     framingData.add(parity);
 
-    //TODO: should add dataframe number
-    framingData.add(zeroTag);
+    // Add a frame number to the frame
+    // if frame 1 was spent last, send frame 0; if frame 0 was sent last, send frame1
+    if(sentData1){
+        framingData.add(zeroTag);
+        sentData0 = true;
+        sentData1 = false;
+    } else if(sentData0){
+        framingData.add(oneTag);
+        sentData0 = false;
+        sentData1 = true;
+    }
 	
 	// End with a stop tag.
 	framingData.add(stopTag);
@@ -106,7 +115,7 @@ public class PARDataLinkLayer extends DataLinkLayer {
 	}
 	
 	// Try to extract data while waiting for an unescaped stop tag.
-        int                       index = 1;
+    int                       index = 1;
 	LinkedList<Byte> extractedBytes = new LinkedList<Byte>();
 	boolean            stopTagFound = false;
 	while (!stopTagFound && i.hasNext()) {
@@ -132,27 +141,17 @@ public class PARDataLinkLayer extends DataLinkLayer {
 		    return null;
 		}
 	    } else if (current == stopTag) {
-		cleanBufferUpTo(index);
-		stopTagFound = true;
+            cleanBufferUpTo(index);
+            stopTagFound = true;
 	    } else if (current == startTag) {
-		cleanBufferUpTo(index - 1);
-                index = 1;
-		extractedBytes = new LinkedList<Byte>();
-	    } else if (current == ackTag) {
-	        current = i.next();
-	        if (current == 0) {
-	            //Ack0 received
-	            isWaitingAck0 = false;
-            } else {
-	            //Ack1 received
-	            isWaitingAck1 = false;
-            }
-        }
-	    else {
-		extractedBytes.add(current);
+		    cleanBufferUpTo(index - 1);
+            index = 1;
+		    extractedBytes = new LinkedList<Byte>();
+	    } else {
+		    extractedBytes.add(current);
 	    }
 
-	}
+    }
 
 	// If there is no stop tag, then the frame is incomplete.
 	if (!stopTagFound) {
@@ -163,9 +162,9 @@ public class PARDataLinkLayer extends DataLinkLayer {
 	    System.out.println("ParityDataLinkLayer.processFrame(): Got whole frame!");
 	}
         
-	// The final byte inside the frame is the parity.  Compare it to a
-	// recalculation.
+    // The final byte inside the frame is the frame number. Remove it and store it.
     byte dataFrameNum = extractedBytes.remove(extractedBytes.size() - 1);
+	// The final byte, after the frame number byte is removed, inside the frame is the parity.  Compare it to a recalculation.
 	byte receivedParity   = extractedBytes.remove(extractedBytes.size() - 1);
 	byte calculatedParity = calculateParity(extractedBytes);
 	if (receivedParity != calculatedParity) {
@@ -173,7 +172,7 @@ public class PARDataLinkLayer extends DataLinkLayer {
 	    return null;
 	}
 
-	//add back after calculations to use in sendAck()
+	// Add the frame number back after calculations to use in sendAck()
 	extractedBytes.addFirst(dataFrameNum);
 
 	return extractedBytes;
@@ -192,11 +191,21 @@ public class PARDataLinkLayer extends DataLinkLayer {
      */ 
     protected void finishFrameSend (Queue<Byte> frame) {
 
-        // COMPLETE ME WITH FLOW CONTROL
-        data0 = frame;
-        sendTime = Instant.now();
-        sentData0 = true;
-        isWaitingAck0 = true;
+        // Check to see which frame number was sent
+        /** Then:
+         *  store the frame in case it needs to be retransmitted
+         *  store the time the frame was sent in an Instant object
+         *  place the DLL in a state of waiting for an acknowledgement of that frame number
+         */
+        if(sentData0){
+            data0 = frame;
+            sendTime = Instant.now();
+            isWaitingAck0 = true;
+        } else if(sentData1){
+            data1 = frame;
+            sendTime = Instant.now();
+            isWaitingAck1 = true;
+        }
         
     } // finishFrameSend ()
     // =========================================================================
@@ -213,20 +222,42 @@ public class PARDataLinkLayer extends DataLinkLayer {
      */
     protected void finishFrameReceive (Queue<Byte> frame) {
 
+        // Remove the first byte of the frame which contains the frame number
         byte dataFrameNum = frame.remove();
 
-        // COMPLETE ME WITH FLOW CONTROL
-        //send Ack
-        sendAck(dataFrameNum);
-        //sendBuffer.add(ackTag);
-        
-        // Deliver frame to the client.
-        byte[] deliverable = new byte[frame.size()];
-        for (int i = 0; i < deliverable.length; i += 1) {
-            deliverable[i] = frame.remove();
-        }
+        // Analyze the frame. If...
+	    //   (a) it carries an acknowledgement tag: 
+	    //          set the proper isWaitingAck# Boolean variable to false
+	    //   (b & c) the frame number doesn't match the expected frame number, we assume the acknowledgment frame was lost:    
+	    //          resend the previous acknowledgment frame               
+	    //   (c) otherwise assume it is regular data:  
+	    //          send an acknowledgement frame and pass data to the client                    
+        if(frame.peek() == ackTag){ 
+            if(dataFrameNum == 0){
+                System.out.println("Receiving Ack" + (int)dataFrameNum);
+                isWaitingAck0 = false;
+            } else if(dataFrameNum == 1){
+                System.out.println("Receiving Ack" + (int)dataFrameNum);
+                isWaitingAck1 = false;
+            }
+        } else if(expectingData0 && dataFrameNum == 1){
+            System.out.println("Received unexpected Data Frame Number");
+            sendAck((byte)1);
+        } else if(expectingData1 && dataFrameNum == 0){
+            System.out.println("Received unexpected Data Frame Number");
+            sendAck((byte)0);
+        } else {
+            sendAck(dataFrameNum);
+            System.out.println("Sending Ack" + (int)dataFrameNum);
+            
+            // Deliver frame to the client.
+            byte[] deliverable = new byte[frame.size()];
+            for (int i = 0; i < deliverable.length; i += 1) {
+                deliverable[i] = frame.remove();
+            }
 
-        client.receive(deliverable);
+            client.receive(deliverable);
+        }
         
     } // finishFrameReceive ()
     // =========================================================================
@@ -241,40 +272,58 @@ public class PARDataLinkLayer extends DataLinkLayer {
      */
     protected void checkTimeout () {
 
-        // COMPLETE ME WITH FLOW CONTROL
-        if(Instant.now().minusSeconds(timeoutTime).isAfter(sendTime)){
+        /** Check timeout by...
+         *  Seeing if there is a defined sendTime to compare,
+         *  Subtract the timeout duration from the current time
+         *  Check if that difference is after the sendTime of the frame
+         *  If true, retransmit the frame and do the following:
+         *      -reset sendTime to the time of the retransmission
+         *      -retransmit the data
+         *      -call finishFrameSend(data) to complete the retransmission
+         */
+        if(sendTime != null && Instant.now().minusSeconds(timeoutTime).isAfter(sendTime)){
             //retransmit
             if(isWaitingAck0){
+                System.out.println("RETRANSMIT!");
+                sendTime = Instant.now();
                 transmit(data0);
-                sendTime = Instant.now();
+                finishFrameSend(data0);
             } else if(isWaitingAck1){
-                transmit(data1);
+                System.out.println("RETRANSMIT!");
                 sendTime = Instant.now();
+                transmit(data1);
+                finishFrameSend(data1);
             }
         }
 
     } // checkTimeout ()
     // =========================================================================
 
+
+
+    //==========================================================================
     /**
      * Send an acknowledgement of either data frame 0 or 1 depending on what
      * dataFrameNum equals
      */
-
-    protected void sendAck (byte dataFrameNum) {
+    private void sendAck (byte dataFrameNum) {
 
         Queue<Byte> data = new LinkedList<Byte>();
-
-        data.add(startTag);
         data.add(ackTag);
-
         data.add(dataFrameNum);
-
-        data.add(stopTag);
-
-        transmit(data);
+        Queue<Byte> framedData = createFrame(data);
+        transmit(framedData);
+        if(dataFrameNum == 0){
+            expectingData0 = false;
+            expectingData1 = true;
+        } else {
+            expectingData0 = true;
+            expectingData1 = false;
+        }
 
     }
+    //==========================================================================
+
 
 
     // =========================================================================
@@ -286,23 +335,25 @@ public class PARDataLinkLayer extends DataLinkLayer {
      */
     @Override
     protected Queue<Byte> sendNextFrame () {
-
+        
+        // If the buffer is empty, or we are waiting on an acknowledgement,
+        // Don't send anything
         if (sendBuffer.isEmpty() || isWaitingAck0 || isWaitingAck1) {
             return null;
         }
         
-	// Extract a frame-worth of data from the sending buffer.
-	int frameSize = ((sendBuffer.size() < MAX_FRAME_SIZE)
-			 ? sendBuffer.size()
-			 : MAX_FRAME_SIZE);
-	Queue<Byte> data = new LinkedList<Byte>();
-	for (int j = 0; j < frameSize; j += 1) {
-	    data.add(sendBuffer.remove());
-	}
+        // Extract a frame-worth of data from the sending buffer.
+        int frameSize = ((sendBuffer.size() < MAX_FRAME_SIZE)
+                ? sendBuffer.size()
+                : MAX_FRAME_SIZE);
+        Queue<Byte> data = new LinkedList<Byte>();
+        for (int j = 0; j < frameSize; j += 1) {
+            data.add(sendBuffer.remove());
+        }
 
-	// Create a frame from the data and transmit it.
-	Queue<Byte> framedData = createFrame(data);
-	transmit(framedData);
+        // Create a frame from the data and transmit it.
+        Queue<Byte> framedData = createFrame(data);
+        transmit(framedData);
 
         return framedData;
 
@@ -364,35 +415,39 @@ public class PARDataLinkLayer extends DataLinkLayer {
     /** The stop tag. */
     private final byte stopTag   = (byte)'}';
 
-    /** The Ack Frame */
+    /** The ack frame */
     private final byte ackTag    = (byte)'~';
 
     /** The escape tag. */
     private final byte escapeTag = (byte)'\\';
 
-    /** The Zero tag  */
+    /** The zero tag  */
     private final byte zeroTag   = (byte) 0;
 
-    /** The One tag. */
+    /** The one tag. */
     private final byte oneTag    = (byte) 1;
 
-    /** The Timeout Time (in milliseconds) */
-    private final int timeoutTime = 5;
+    /** The timeout time (in seconds) */
+    private final int timeoutTime = 2;
 
-    /** The Send Time (in seconds) */
+    /** The send time instant*/
     private Instant sendTime;
 
-    /** The sent Data */
+    /** The temporarily stored sent data */
     private Queue<Byte> data0;
     private Queue<Byte> data1;
 
-    /** Sent Booleans */
+    /** The previously sent frame number */
     private Boolean sentData0 = false;
-    private Boolean sentData1 = false;
+    private Boolean sentData1 = true;
 
-    /** If DLL is waiting for Acknowledgement */
+    /** If DLL is waiting for an acknowledgement of a certain frame number*/
     private Boolean isWaitingAck0 = false;
     private Boolean isWaitingAck1 = false;
+
+    /** Which frame number the DLL is expecting */
+    private Boolean expectingData0 = true;
+    private Boolean expectingData1 = false;
 
     // =========================================================================
 
@@ -402,4 +457,3 @@ public class PARDataLinkLayer extends DataLinkLayer {
 // =============================================================================
 } // class ParityDataLinkLayer
 // =============================================================================
-
