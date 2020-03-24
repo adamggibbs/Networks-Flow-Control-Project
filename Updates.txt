@@ -1,0 +1,15 @@
+I moved the checking for the acknowledgement tag into the finishFrameReceive() method. This means:
+
+ack tags are treated as regular data in processFrame()
+in sendAck(), it now calls createFrame() on the Queue containing the ackTag and DataFrameNum. Then it transmits via transmit().
+finishFrameReceive() is one big if else chain to check what was in the received frame
+Secondly, the whole premise is based on the "sent" and "waiting" variables. When data0 is sent, the sentData0 becomes true and the reverse is true as well. This means:
+
+In createFrame(), if sentData0 is true, then the next frame will be numbered 1 and the booleans will be adjusted. The reverse is true.
+All the boolean checking is a lot more straightforward compared to the orignal "sendNextData0" idea I had.
+I also added the flow control in that if the timeout actually occurs then, it will retransmit. Also I introduced the "expecting" booleans which keep track of which booleans the DLL expects to receive next. This checks to see if the ack frame didn't go through as the sender will retransmit but the receiver will be expecting the next frame. In this case, it'll resent the previous acknowledgement form. This is found in the finishFrameReceive() method. *This is the one part that is not 100% working yet.
+
+Next Steps:
+
+Test the code a lot. Make sure what I think is working is actually working.
+Complete the stop and wait flow control portion that corrects the data flow if a frame other than the one that was expected is received as described above.
